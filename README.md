@@ -1,0 +1,2 @@
+# ollamaLearn
+Learning ollama
