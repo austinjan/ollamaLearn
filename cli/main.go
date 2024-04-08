@@ -13,12 +13,12 @@ import (
 )
 
 var GenerateURL = "/api/generate"
+var ChatURL = "/api/chat"
 
-// Message represents the structure of each JSON object in the stream
-type Message struct {
+// BasicResponse
+type BasicResponse struct {
 	Model              string `json:"model"`
 	CreatedAt          string `json:"created_at"`
-	Response           string `json:"response"` // Changed from a nested Message struct to a direct string field
 	Done               bool   `json:"done"`
 	TotalDuration      int    `json:"total_duration,omitempty"`
 	LoadDuration       int    `json:"load_duration,omitempty"`
@@ -26,26 +26,150 @@ type Message struct {
 	PromptEvalDuration int    `json:"prompt_eval_duration,omitempty"`
 	EvalCount          int    `json:"eval_count,omitempty"`
 	EvalDuration       int    `json:"eval_duration,omitempty"`
-	// You might also want to include the other fields like 'context', 'total_duration', etc., based on your needs
 }
+
+// Message represents the structure of each JSON object in the stream
+type Message struct {
+	Response string `json:"response"`
+	BasicResponse
+}
+
+// /chat API data defines
+type ChatResponse struct {
+	Message ChatMessage `json:"message" mapstructure:"message"`
+	BasicResponse
+}
+
+type ChatMessage struct {
+	Role    string `json:"role" mapstructure:"role"` // the role of the message, either system, user or assistant
+	Content string `json:"content" mapstructure:"content"`
+}
+
+type ChatParameters struct {
+	Format  string         `json:"format,omitempty" mapstructure:"format"`
+	Stream  bool           `json:"stream,omitempty" mapstructure:"stream"`
+	Options map[string]any `json:"options,omitempty" mapstructure:"options"`
+}
+
+// /chat API
+type ChatRequest struct {
+	Model    string        `json:"model" mapstructure:"model"`
+	Messages []ChatMessage `json:"messages" mapstructure:"messages"`
+}
+
+// RequestChat sends a request to the /chat API
+func RequestChat(model string, messages []ChatMessage, stream chan<- string) (string, error) {
+
+	apiURL := fmt.Sprintf("http://%s:%s%s", ollamaHost, ollamaPort, ChatURL)
+	body := ChatRequest{
+		Model:    model,
+		Messages: messages,
+	}
+	jsonByte, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal JSON: %v", err)
+	}
+	buffer := bytes.NewBuffer(jsonByte)
+	resp, err := http.Post(apiURL, "application/json", buffer)
+	if err != nil {
+		return "", fmt.Errorf("failed to make request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("received non-200 response status: %d", resp.StatusCode)
+	}
+	var result string
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadBytes('\n')
+		// fmt.Printf("%s\n", line)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("error reading from stream: %v", err)
+		}
+		var response ChatResponse
+		if err := json.NewDecoder(bytes.NewReader(line)).Decode(&response); err != nil {
+			fmt.Printf("err %v\n", err)
+			return "", fmt.Errorf("error decoding JSON: %v", err)
+		}
+
+		stream <- response.Message.Content
+		result += response.Message.Content
+
+		if response.Done {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// Translater
+func Translater(msg string) {
+	messages := []ChatMessage{
+		{
+			Role:    "system",
+			Content: "Translate the following text to English",
+		},
+		{
+			Role:    "user",
+			Content: msg,
+		},
+	}
+	stream := make(chan string)
+
+	go func() {
+		defer close(stream)
+		if _, err := RequestChat(model, messages, stream); err != nil {
+			log.Fatalf("Failed to request chat: %v", err)
+
+		}
+	}()
+
+	for {
+		select {
+		case text, ok := <-stream:
+			if !ok { // channel is closed
+				return
+			}
+			fmt.Printf("%s", text)
+
+		}
+	}
+
+}
+
+var ollamaHost string
+var ollamaPort string
+var model string
 
 func main() {
 	// flags set ollama host and port
-	var ollamaHost string
-	var ollamaPort string
+
 	var showSummary bool
 	flag.StringVar(&ollamaHost, "h", "localhost", "ollama host")
 	flag.StringVar(&ollamaPort, "p", "11434", "ollama port")
 	// flag show summary
 	flag.BoolVar(&showSummary, "s", false, "show summary")
 	// model
-	var model string
+
 	flag.StringVar(&model, "model", "llama2", "model")
 	// response json
 	var responseJSON bool
 	flag.BoolVar(&responseJSON, "j", false, "response json")
+
+	// translate mode
+	var translate bool
+	flag.BoolVar(&translate, "t", false, "translate mode")
+
 	flag.Parse()
 
+	if translate {
+		Translater(strings.Join(flag.Args(), " "))
+		return
+	}
 	// URL of the HTTP stream
 	url := fmt.Sprintf("http://%s:%s%s", ollamaHost, ollamaPort, GenerateURL)
 	prompt := strings.Join(flag.Args(), " ")
